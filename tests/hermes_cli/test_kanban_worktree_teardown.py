@@ -5,8 +5,13 @@ reaped by anything: ``_cleanup_workspace`` preserved them by design, the CLI
 startup pruner explicitly skips ``t_*`` worktrees ("dispatcher-driven
 lifecycle"), and ``kanban gc`` only swept scratch. A completed or archived
 task's linked worktree is now removed when — and only when — it provably
-holds no work: clean working tree and every commit reachable from a
-remote-tracking ref. Any doubt preserves the worktree.
+holds no work: clean working tree, every commit reachable from a
+remote-tracking ref, AND the branch is either merged into the repo's default
+branch or has a PR (any state) recorded on GitHub (t_7da3ba16 — "pushed
+somewhere" was found to be an insufficient bar: three cards were marked done
+with commits sitting on a pushed-but-un-PR'd branch, and one such worktree
+was reaped by this exact cleanup path before any PR existed, losing the
+work). Any doubt preserves the worktree.
 """
 
 from __future__ import annotations
@@ -128,6 +133,58 @@ def test_non_git_dir_preserved(tmp_path: Path) -> None:
     assert plain.is_dir()
 
 
+def test_pushed_unmerged_branch_without_pr_preserved(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """t_7da3ba16: pushed-but-unmerged, no PR on record -> preserved.
+
+    ``git log HEAD --not --remotes`` reports clean once a branch is pushed,
+    but that alone is not \"verifiably in GitHub\" — the branch also needs to
+    be merged into the default branch or have a PR opened. ``_branch_has_pr``
+    hits the real ``gh`` CLI/network, so it's monkeypatched here to isolate
+    this test from external state; test_kanban_worktree_teardown's own
+    real-repo/real-`gh` verification lives outside pytest (see PR body).
+    """
+    wt = _make_worktree(repo, "t_hhhh8888")
+    (wt / "work.txt").write_text("real feature work\n", encoding="utf-8")
+    _git("-C", str(wt), "add", "work.txt")
+    _git("-C", str(wt), "commit", "-m", "feature work")
+    _git("-C", str(wt), "push", "origin", "HEAD")
+    monkeypatch.setattr(kb, "_branch_has_pr", lambda *_a, **_kw: False)
+    kb._cleanup_worktree_workspace("t_hhhh8888", str(wt))
+    assert wt.is_dir(), "worktree with no merge and no PR must be preserved"
+
+
+def test_pushed_unmerged_branch_with_pr_reaped(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pushed + unmerged but a PR exists on GitHub -> safe to reap."""
+    wt = _make_worktree(repo, "t_iiii9999")
+    (wt / "work.txt").write_text("real feature work\n", encoding="utf-8")
+    _git("-C", str(wt), "add", "work.txt")
+    _git("-C", str(wt), "commit", "-m", "feature work")
+    _git("-C", str(wt), "push", "origin", "HEAD")
+    monkeypatch.setattr(kb, "_branch_has_pr", lambda *_a, **_kw: True)
+    kb._cleanup_worktree_workspace("t_iiii9999", str(wt))
+    assert not wt.exists()
+
+
+def test_pr_lookup_unknown_preserves_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_branch_has_pr`` returning ``None`` (gh unavailable/unauth/rate
+    limited/no GitHub remote) must fail SAFE — never read as \"no PR needed\".
+    """
+    wt = _make_worktree(repo, "t_jjjj0000")
+    (wt / "work.txt").write_text("real feature work\n", encoding="utf-8")
+    _git("-C", str(wt), "add", "work.txt")
+    _git("-C", str(wt), "commit", "-m", "feature work")
+    _git("-C", str(wt), "push", "origin", "HEAD")
+    monkeypatch.setattr(kb, "_branch_has_pr", lambda *_a, **_kw: None)
+    kb._cleanup_worktree_workspace("t_jjjj0000", str(wt))
+    assert wt.is_dir(), "unknown PR status must preserve, not delete"
+
+
 def test_tree_dirtied_between_check_and_removal_preserved(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -188,6 +245,32 @@ def test_complete_task_preserves_dirty_worktree(kanban_home: Path, repo: Path) -
         assert kb.complete_task(conn, tid, summary="done")
     assert wt.is_dir()
     assert (wt / "wip.txt").exists()
+
+
+def test_complete_task_preserves_pushed_committed_worktree_without_pr(
+    kanban_home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance test (t_7da3ba16 #4): a real dummy task does real work in
+    its worktree, pushes the branch (so the pre-existing unpushed-commits
+    guard alone would NOT catch it), never opens a PR, then is marked
+    ``done`` through the real ``complete_task`` lifecycle call — exactly
+    the path that silently deleted work before this fix. The worktree and
+    its branch must survive completion.
+    """
+    with kb.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        (wt / "real_feature.py").write_text("def feature(): ...\n", encoding="utf-8")
+        _git("-C", str(wt), "add", "real_feature.py")
+        _git("-C", str(wt), "commit", "-m", "real feature work")
+        _git("-C", str(wt), "push", "origin", "HEAD")
+        monkeypatch.setattr(kb, "_branch_has_pr", lambda *_a, **_kw: False)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.complete_task(conn, tid, summary="done")
+    assert wt.is_dir(), "pushed-but-un-PR'd work must survive task completion"
+    assert (wt / "real_feature.py").exists()
+    assert _branch_exists(repo, f"wt/{tid}")
 
 
 def test_archive_task_reaps_clean_worktree(kanban_home: Path, repo: Path) -> None:

@@ -5953,6 +5953,91 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         pass  # best-effort — never block completion
 
 
+def _default_branch(repo_root: Path) -> str:
+    """Best-effort default branch name (``origin/HEAD`` symref); falls back
+    to ``main`` when it cannot be determined (e.g. never fetched)."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True, encoding='utf-8', errors='replace',
+            timeout=10,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split("/", 1)[-1]
+    except Exception:
+        pass
+    return "main"
+
+
+def _branch_merged_into_default(repo_root: Path, branch: str, default_branch: str) -> bool:
+    """True only if *branch* is a strict ancestor of *default_branch* — i.e.
+    fully merged. Any git failure fails safe to False (not merged)."""
+    if branch == default_branch:
+        return True
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", branch, default_branch],
+            capture_output=True,
+            text=True, encoding='utf-8', errors='replace',
+            timeout=15,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _github_repo_slug(repo_root: Path) -> Optional[str]:
+    """Parse ``owner/repo`` off the ``origin`` remote URL (https or ssh)."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True, encoding='utf-8', errors='replace',
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        url = result.stdout.strip()
+        m = re.search(r"github\.com[:/]+([\w.-]+/[\w.-]+?)(?:\.git)?/?$", url)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _branch_has_pr(repo_root: Path, branch: str) -> Optional[bool]:
+    """Whether a PR (any state — open/merged/closed) exists for *branch*.
+
+    Returns ``None`` when this could not be determined (``gh`` missing,
+    unauthenticated, rate-limited, no GitHub remote, network error, bad
+    JSON). Callers MUST treat ``None`` as "unknown" and preserve — an
+    inability to verify must never be read as "safe to delete", or a
+    transient ``gh`` hiccup silently reintroduces the exact data-loss bug
+    this check exists to close (t_7da3ba16).
+    """
+    slug = _github_repo_slug(repo_root)
+    if not slug:
+        return None
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--repo", slug, "--head", branch,
+             "--state", "all", "--json", "number"],
+            capture_output=True,
+            text=True, encoding='utf-8', errors='replace',
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout or "[]")
+        return bool(data)
+    except Exception:
+        return None
+
+
 def _cleanup_worktree_workspace(
     task_id: str, path: str, branch_name: Optional[str] = None
 ) -> None:
@@ -5964,6 +6049,15 @@ def _cleanup_worktree_workspace(
     files, unpushed commits, unresolvable repo, failing git — preserves the
     worktree. The task's auto-generated ``wt/<task-id>`` branch is deleted
     with it; custom branches are kept. Best-effort like the scratch path.
+
+    t_7da3ba16: "pushed to *some* remote-tracking ref" is not the same as
+    "verifiably in GitHub" — three cards were marked done with commits
+    sitting on a pushed-but-un-PR'd branch, and one of those worktrees was
+    then reaped here before a PR ever existed, losing the work outright.
+    On top of the dirty/unpushed guard below, a worktree is only reaped once
+    its branch is EITHER fully merged into the repo's default branch OR has
+    a PR (any state) recorded on GitHub. Any doubt — no GitHub remote, ``gh``
+    unavailable/unauthenticated/rate-limited — preserves the worktree.
     """
     try:
         from cli import _worktree_has_unpushed_commits, _worktree_is_dirty
@@ -5985,6 +6079,24 @@ def _cleanup_worktree_workspace(
                 task_id, wp,
             )
             return
+        branch = _git_current_branch(wp) or (branch_name or "").strip()
+        if not branch:
+            _log.info(
+                "Preserving worktree for task %s: could not determine branch at %s",
+                task_id, wp,
+            )
+            return
+        default_branch = _default_branch(repo_root)
+        if not _branch_merged_into_default(repo_root, branch, default_branch):
+            has_pr = _branch_has_pr(repo_root, branch)
+            if has_pr is not True:
+                _log.info(
+                    "Preserving worktree for task %s: branch %r not merged "
+                    "into %r and no verifiable PR (has_pr=%r) at %s — open a "
+                    "PR before this worktree is reclaimed",
+                    task_id, branch, default_branch, has_pr, wp,
+                )
+                return
         # No --force: the dirty/unpushed checks above run before removal, so
         # git's own dirty guard re-verifies at removal time. If the tree
         # became dirty between our check and the removal (TOCTOU), removal
