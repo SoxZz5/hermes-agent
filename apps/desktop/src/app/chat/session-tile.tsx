@@ -616,7 +616,9 @@ export const watchSessionTiles = paneMirror<SessionTile>({
     </SessionTabMenu>
   ),
   // A tile's tab drags like a sidebar row — stack / split / drop-to-link — with
-  // its tap (activate) + double-tap (hide bar) preserved. Always takes the drag.
+  // its tap (activate) preserved. The header-hide double-tap is NOT wired here:
+  // tabs never hide the bar (tree-group passes double=undefined). Always takes
+  // the drag.
   tabDrag: (storedSessionId, event, onTap, double) => {
     startSessionDrag(tileDragPayload(storedSessionId), event, { double, onTap })
 

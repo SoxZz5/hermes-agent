@@ -292,8 +292,9 @@ export function TreeGroup({
   })
 
   // Drag handles preventDefault pointerdown (no native dblclick), so the
-  // header + chips share a synthesized double-tap: restore if collapsed
-  // (undoing the first tap's minimize toggle) and hide the chrome.
+  // header strip / lone label synthesize a double-tap: restore if collapsed
+  // (undoing the first tap's minimize toggle) and hide the chrome. Tabs are
+  // deliberately excluded — see the tab pointerdown below.
   const hideHeaderDoubleTap: DoubleTapContext = {
     key: `hide-header-${node.id}`,
     onDoubleTap: () => {
@@ -545,7 +546,7 @@ export function TreeGroup({
                         e,
                         onTap,
                         stripRef.current ? { groupId: node.id, strip: stripRef.current } : undefined,
-                        hideHeaderDoubleTap,
+                        undefined,
                         t.zones.tabCount(dragSelection.length),
                         dragSelection
                       )
@@ -557,13 +558,18 @@ export function TreeGroup({
                     // session drop language — link/stack/split); `false` defers
                     // to the generic pane move (the workspace tab on a fresh
                     // draft has no session to link).
-                    if (!chrome.tabDrag?.(e, onTap, hideHeaderDoubleTap)) {
+                    // Tabs do NOT carry the header-hide double-tap: two quick
+                    // taps on a session tab hid the whole strip with no way
+                    // back from the zone (bug: dblclick reflex = stranded
+                    // chrome). The gesture lives on the header strip / lone
+                    // label only — tabs just activate, per the ruling above.
+                    if (!chrome.tabDrag?.(e, onTap, undefined)) {
                       startPaneDrag(
                         paneId,
                         e,
                         onTap,
                         stripRef.current ? { groupId: node.id, strip: stripRef.current } : undefined,
-                        hideHeaderDoubleTap,
+                        undefined,
                         title
                       )
                     }

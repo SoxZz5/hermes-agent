@@ -34,9 +34,10 @@ export interface GroupNode {
   /** Collapsed to header strip (chevron restores). */
   minimized?: boolean
   /**
-   * Header hidden entirely (double-click the header to hide, double-click the
-   * zone's top edge to bring it back). Minimize always shows the header —
-   * a minimized group IS its header.
+   * Header hidden entirely (double-tap the header strip's empty area / a lone
+   * pane's label to hide; bring it back via the zone menu's Show header,
+   * gaining a tab, or tab-cycling onto a main-strip pane). Minimize always
+   * shows the header — a minimized group IS its header.
    */
   headerHidden?: boolean
 }
