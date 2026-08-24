@@ -837,14 +837,19 @@ def set_project_organization(
     doesn't exist — the FK would also catch this, but a explicit check gives
     callers (RPC/CLI) a clean 4xx-shaped error instead of a raw sqlite one.
     """
-    if get_project(conn, project_id) is None:
+    proj = get_project(conn, project_id)
+    if proj is None:
         raise ValueError(f"no such project: {project_id}")
-    if organization_id is not None and get_organization(conn, organization_id) is None:
-        raise ValueError(f"no such organization: {organization_id}")
+    resolved_org_id = None
+    if organization_id is not None:
+        org = get_organization(conn, organization_id)
+        if org is None:
+            raise ValueError(f"no such organization: {organization_id}")
+        resolved_org_id = org.id
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE projects SET organization_id = ? WHERE id = ?",
-            (organization_id, project_id),
+            (resolved_org_id, proj.id),
         )
     return cur.rowcount > 0
 

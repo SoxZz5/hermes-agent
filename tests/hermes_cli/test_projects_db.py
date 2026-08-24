@@ -265,6 +265,31 @@ def test_set_project_organization_rejects_unknown_ids(conn):
         pdb.set_project_organization(conn, pid, "o_nope")
 
 
+def test_set_project_organization_accepts_project_slug(conn):
+    """B1 repro: passing a project *slug* (not id) must still update the
+    row, not silently match 0 rows via a WHERE id=? on an unresolved slug."""
+    pid = pdb.create_project(conn, name="Hermes Agent", folders=["/tmp/hermes"])
+    oid = pdb.create_organization(conn, name="Family Office")
+    proj = pdb.get_project(conn, pid)
+
+    assert pdb.set_project_organization(conn, proj.slug, oid) is True
+    assert pdb.get_project(conn, pid).organization_id == oid
+
+
+def test_set_project_organization_accepts_organization_slug(conn):
+    """B2 repro: passing an organization *slug* (not id) must resolve to
+    the canonical org id before the write, not raise a raw IntegrityError
+    from writing the unresolved slug into the FK column."""
+    pid = pdb.create_project(conn, name="App", folders=["/www/app"])
+    oid = pdb.create_organization(conn, name="Family Office")
+    org = pdb.get_organization(conn, oid)
+
+    assert pdb.set_project_organization(conn, pid, org.slug) is True
+    proj = pdb.get_project(conn, pid)
+    assert proj.organization_id == oid
+    assert proj.organization.id == oid
+
+
 def test_delete_organization_ungroups_member_projects(conn):
     """Deleting an org sets member projects' organization_id back to NULL
     (FK ON DELETE SET NULL) rather than orphaning the FK or cascading."""
